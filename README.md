@@ -17,5 +17,19 @@ tools. This repository will eventually include a functional test suite.
 7. use docker-compose logs to see if the cluster came up properly
 8. start testing the cluster in other ways
 
+## Requirements
 
+* docker 1.8+
+* docker-compose 1.4+
+
+## Example Tests
+
+1. Kill the master and see if failover works.  For example, if the master is node2:
+
+    docker stop dbnode2_1
+    
+2. add a node and see if it joins the cluster:
+
+    docker-compose -f patroni-compose-addnode.yml
+    
 
