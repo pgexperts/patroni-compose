@@ -1,0 +1,31 @@
+# docker compose file for running a 3-node PostgreSQL cluster
+# with etcd as the SIS
+
+etcd:
+    container_name: etcd
+    image: quay.io/coreos/etcd
+    expose: 
+        - "2379"
+        - "2380"
+        - "4001"
+    command: -listen-client-urls http://0.0.0.0:2379,http://0.0.0.0:4001 -advertise-client-urls http://0.0.0.0:2379,http://0.0.0.0:4001
+    
+dbnode1: 
+    image: jberkus/patroni-node
+    hostname: dbnode1
+    expose: 
+        - "5432"
+        - "8001"
+    links: 
+        - etcd:etcd
+    volumes: 
+        - ./etc/wal-e.d:/etc/wal-e.d
+        - ./patroni:/patroni
+        - ./scripts:/scripts
+    env_file:
+        - patroni-secrets.env
+    environment:
+        PGVERSION: 9.4
+        NODE: dbnode1
+        CLUSTER: testcluster
+    command: /scripts/entrypoint.sh
