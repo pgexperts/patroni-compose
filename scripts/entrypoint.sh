@@ -34,7 +34,7 @@ postgresql:
   data_dir: /pgdata/data
   maximum_lag_on_failover: 10485760 # 10 megabyte in bytes
   use_slots: True
-  pgpass: /user/lib/postgresql/pgpass0
+  pgpass: /tmp/pgpass0
   create_replica_method: basebackup
   pg_hba:
   - local all all  trust
