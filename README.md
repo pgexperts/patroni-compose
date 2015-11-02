@@ -14,8 +14,14 @@ tools. This repository will eventually include a functional test suite.
 
     docker-compose -f patroni-compose-etcd-3.yml up -d
     
-7. use docker-compose logs to see if the cluster came up properly
+7. use docker-compose logs to see if the cluster came up properly:
+
+    docker-compose -f patroni-compose-etcd-3.yml logs
+
 8. start testing the cluster in other ways
+9. Shut down the test cluster with:
+
+    docker-compose -f patroni-compose-etcd-3.yml stop
 
 ## Requirements
 
@@ -30,6 +36,10 @@ tools. This repository will eventually include a functional test suite.
     
 2. add a node and see if it joins the cluster:
 
-    docker-compose -f patroni-compose-addnode.yml
+    docker-compose -f patroni-compose-addnode.yml up -d
+
+Note that if you add a node using the addnode compose script, you will need to shut it down separately with:
+
+    docker-compose -f patroni-compose-addnode.yml stop
     
 
