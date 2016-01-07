@@ -31,11 +31,12 @@ postgresql:
   scope: *scope
   listen: 0.0.0.0:5432
   connect_address: ${DOCKER_IP}:5432
-  data_dir: /pgdata/data
+  data_dir: /pgdata/datacd p
   maximum_lag_on_failover: 10485760 # 10 megabyte in bytes
   use_slots: True
   pgpass: /tmp/pgpass0
-  create_replica_method: basebackup
+  create_replica_methods:
+    - basebackup
   pg_hba:
   - local all all  trust
   - host all all 0.0.0.0/0 md5
@@ -66,6 +67,7 @@ __EOF__
 else
     cat >> /etc/patroni/patroni.yml <<__EOF__
     max_replication_slots: 7
+    wal_keep_segments: 5
 __EOF__
 fi
 
