@@ -28,4 +28,4 @@ dbnode1:
         PGVERSION: 9.4
         NODE: dbnode1
         CLUSTER: testcluster
-    command: /scripts/entrypoint.sh
+    entrypoint: /bin/bash /scripts/entrypoint.sh

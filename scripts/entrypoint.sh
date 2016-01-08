@@ -31,7 +31,7 @@ postgresql:
   scope: *scope
   listen: 0.0.0.0:5432
   connect_address: ${DOCKER_IP}:5432
-  data_dir: /pgdata/datacd p
+  data_dir: /pgdata/data
   maximum_lag_on_failover: 10485760 # 10 megabyte in bytes
   use_slots: True
   pgpass: /tmp/pgpass0

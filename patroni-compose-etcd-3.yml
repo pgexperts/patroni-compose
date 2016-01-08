@@ -28,7 +28,7 @@ dbnode1:
         PGVERSION: 9.4
         NODE: dbnode1
         CLUSTER: testcluster
-    command: /scripts/entrypoint.sh
+    entrypoint: /bin/bash /scripts/entrypoint.sh
 
 dbnode2: 
     image: jberkus/patroni-node
@@ -48,7 +48,7 @@ dbnode2:
         PGVERSION: 9.4
         NODE: dbnode2
         CLUSTER: testcluster
-    command: /scripts/entrypoint.sh
+    entrypoint: /bin/bash /scripts/entrypoint.sh
      
 dbnode3: 
     image: jberkus/patroni-node
@@ -68,7 +68,7 @@ dbnode3:
         PGVERSION: 9.4
         NODE: dbnode3
         CLUSTER: testcluster
-    command: /scripts/entrypoint.sh
+    entrypoint: /bin/bash /scripts/entrypoint.sh
  
 #haproxy:
 #    image: haproxy
