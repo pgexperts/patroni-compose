@@ -4,10 +4,12 @@ import psycopg2
 import shlex
 import shutil
 import subprocess
+import tempfile
 import time
 
 from patroni.exceptions import PostgresConnectionException, PostgresException
 from patroni.utils import Retry, RetryFailedError
+from six import string_types
 from six.moves.urllib_parse import urlparse
 from threading import Lock
 
@@ -42,12 +44,14 @@ class Postgresql:
     def __init__(self, config):
         self.config = config
         self.name = config['name']
+        self.server_parameters = config.get('parameters', {})
         self.scope = config['scope']
         self.listen_addresses, self.port = config['listen'].split(':')
         self.data_dir = config['data_dir']
         self.replication = config['replication']
         self.superuser = config['superuser']
         self.admin = config['admin']
+        self.initdb_options = config.get('initdb', [])
         self.pgpass = config.get('pgpass', None) or os.path.join(os.path.expanduser('~'), 'pgpass')
         self.pg_rewind = config.get('pg_rewind', {})
         self.callback = config.get('callbacks', {})
@@ -164,9 +168,39 @@ class Postgresql:
     def data_directory_empty(self):
         return not os.path.exists(self.data_dir) or os.listdir(self.data_dir) == []
 
+    @staticmethod
+    def initdb_allowed_option(name):
+        if name in ['pgdata', 'nosync', 'pwfile', 'sync-only']:
+            raise Exception('{} option for initdb is not allowed'.format(name))
+        return True
+
+    def get_initdb_options(self):
+        options = []
+        for o in self.initdb_options:
+            if isinstance(o, string_types) and self.initdb_allowed_option(o):
+                options.append('--{}'.format(o))
+            elif isinstance(o, dict):
+                keys = list(o.keys())
+                if len(keys) != 1 or not isinstance(keys[0], string_types) or not self.initdb_allowed_option(keys[0]):
+                    raise Exception('Invalid option: {}'.format(o))
+                options.append('--{}={}'.format(keys[0], o[keys[0]]))
+            else:
+                raise Exception('Unknown type of initdb option: {}'.format(o))
+        return options
+
     def initialize(self):
         self.set_state('initalizing new cluster')
-        ret = subprocess.call(self._pg_ctl + ['initdb', '-o', '--encoding=UTF8']) == 0
+        options = self.get_initdb_options()
+        pwfile = None
+        if self.superuser and 'username' not in self.superuser and 'password' in self.superuser:
+            (fd, pwfile) = tempfile.mkstemp()
+            os.write(fd, self.superuser['password'].encode())
+            os.close(fd)
+            options.append('--pwfile={}'.format(pwfile))
+
+        ret = subprocess.call(self._pg_ctl + ['initdb'] + (['-o', ' '.join(options)] if options else [])) == 0
+        if pwfile:
+            os.remove(pwfile)
         if ret:
             self.write_pg_hba()
         else:
@@ -195,73 +229,58 @@ class Postgresql:
 
     @staticmethod
     def build_connstring(conn):
-        mconn = ""
-        for param, val in conn.items():
-            mconn = mconn + "{0}={1} ".format(param, val)
-
-        return mconn
+        """
+        >>> Postgresql.build_connstring({'host': '127.0.0.1', 'port': '5432'}) == 'host=127.0.0.1 port=5432'
+        True
+        """
+        return ' '.join('{}={}'.format(param, val) for param, val in sorted(conn.items()))
 
     def create_replica(self, leader, env):
         # create the replica according to the replica_method
         # defined by the user.  this is a list, so we need to
         # loop through all methods the user supplies
         connstring = leader.conn_url
-        # get list of replica methods from config
-        replica_list = self.config.get('create_replica_method', 'basebackup')
-        replica_methods = [rm.strip() for rm in replica_list.split(',')]
+        # get list of replica methods from config.
+        # If there is no configuration key, or no value is specified, use basebackup
+        replica_methods = self.config.get('create_replica_method') or ['basebackup']
         # go through them in priority order
+        ret = 1
         for replica_method in replica_methods:
             # if the method is basebackup, then use the built-in
             if replica_method == "basebackup":
                 ret = self.basebackup(leader, env)
                 if ret == 0:
+                    logger.info("replica has been created using basebackup")
                     # if basebackup succeeds, exit with success
                     break
             else:
+                cmd = replica_method
+                method_config = {}
                 # user-defined method; check for configuration
                 # not required, actually
                 if replica_method in self.config:
+                    method_config = self.config[replica_method].copy()
                     # look to see if the user has supplied a full command path
                     # if not, use the method name as the command
-                    if "command" in self.config[replica_method]:
-                        cmd = self.config[replica_method]["command"]
-                    else:
-                        cmd = replica_method
-
-                    # get the rest of the replica config
-                    method_config = self.config[replica_method].copy()
-                    # remove the command and turn it into a shlex set
-                    del method_config["command"]
+                    cmd = method_config.pop('command', cmd)
                     # add the default parameters
+                try:
                     method_config.update({"scope": self.scope,
                                           "role": "replica",
                                           "datadir": self.data_dir,
                                           "connstring": connstring})
                     params = ["--{0}={1}".format(arg, val) for arg, val in method_config.items()]
-                else:
-                    cmd = replica_method
-                    method_config = {"scope": self.scope,
-                                    "role": "replica",
-                                    "datadir": self.data_dir,
-                                    "connstring": connstring}
-
-                try:
                     # call script with the full set of parameters
                     ret = subprocess.call(shlex.split(cmd) + params, env=env)
                     # if we succeeded, stop
                     if ret == 0:
+                        logger.info("replica has been created using {0}".format(replica_method))
                         break
                 except Exception as e:
-                    logger.exception('Error creating replica using method {0}: {1}'.format(replica_method, e.str))
+                    logger.exception('Error creating replica using method {0}: {1}'.format(replica_method, str(e)))
                     ret = 1
 
-        # write the recovery.conf
-        if ret == 0:
-            ret = self.write_recovery_conf(leader)
-            return 0
-
-        # out of methods, return 1
-        return 1
+        return ret
 
     def is_leader(self):
         return not self.query('SELECT pg_is_in_recovery()').fetchone()[0]
@@ -323,13 +342,13 @@ class Postgresql:
         ret and not block_callbacks and self.call_nowait(ACTION_ON_START)
         return ret
 
-    def checkpoint(self):
+    def checkpoint(self, connstring=None):
         try:
-            r = parseurl('postgres://{}/postgres'.format(self.local_address))
-            r['options'] = '-c statement_timeout=0'
-            with psycopg2.connect(**r) as conn:
+            connstring = connstring or 'postgres://{}/postgres'.format(self.local_address)
+            with psycopg2.connect(connstring) as conn:
                 conn.autocommit = True
                 with conn.cursor() as cur:
+                    cur.execute("SET statement_timeout = 0")
                     cur.execute('CHECKPOINT')
         except:
             logging.exception('Exception during CHECKPOINT')
@@ -377,7 +396,7 @@ class Postgresql:
 
     def server_options(self):
         options = "--listen_addresses='{}' --port={}".format(self.listen_addresses, self.port)
-        for setting, value in self.config['parameters'].items():
+        for setting, value in self.server_parameters.items():
             options += " --{}='{}'".format(setting, value)
         return options
 
@@ -395,7 +414,7 @@ class Postgresql:
         with open(os.path.join(self.data_dir, 'pg_hba.conf'), 'a') as f:
             f.write('\nhost replication {username} {network} md5\n'.format(**self.replication))
             for line in self.config.get('pg_hba', []):
-                if line.split()[0].strip() == 'hostssl' and self.config['parameters'].get('ssl', 'off').lower() != 'on':
+                if line.split()[0].strip() == 'hostssl' and self.server_parameters.get('ssl', 'off').lower() != 'on':
                     continue
                 f.write(line + '\n')
 
@@ -435,6 +454,9 @@ recovery_target_timeline = 'latest'
         r['user'] = r['username']
         env = self.write_pgpass(r)
         pc = "user={user} host={host} port={port} dbname=postgres sslmode=prefer sslcompression=1".format(**r)
+        # first run a checkpoint on a promoted master in order
+        # to make it store the new timeline (5540277D.8020309@iki.fi)
+        self.checkpoint(pc)
         logger.info("running pg_rewind from {}".format(pc))
         pg_rewind = ['pg_rewind', '-D', self.data_dir, '--source-server', pc]
         try:
@@ -577,21 +599,27 @@ recovery_target_timeline = 'latest'
     def demote(self):
         self.follow_the_leader(None)
 
+    def create_or_update_role(self, name, password, options):
+        self.query("""DO $$
+BEGIN
+    SET local synchronous_commit = 'local';
+    PERFORM * FROM pg_authid WHERE rolname = %s;
+    IF FOUND THEN
+        ALTER ROLE "{0}" WITH LOGIN {1} PASSWORD %s;
+    ELSE
+        CREATE ROLE "{0}" WITH LOGIN {1} PASSWORD %s;
+    END IF;
+END;
+$$""".format(name, options), name, password, password)
+
     def create_replication_user(self):
-        self.query('CREATE USER "{}" WITH REPLICATION ENCRYPTED PASSWORD %s'.format(
-            self.replication['username']), self.replication['password'])
+        self.create_or_update_role(self.replication['username'], self.replication['password'], 'REPLICATION')
 
     def create_connection_users(self):
-        if self.superuser:
-            if 'username' in self.superuser:
-                self.query('CREATE ROLE "{0}" WITH LOGIN SUPERUSER PASSWORD %s'.format(
-                    self.superuser['username']), self.superuser['password'])
-            else:
-                rolsuper = self.query("""SELECT rolname FROM pg_authid WHERE rolsuper = 't'""").fetchone()[0]
-                self.query('ALTER ROLE "{0}" WITH PASSWORD %s'.format(rolsuper), self.superuser['password'])
+        if 'username' in self.superuser:
+            self.create_or_update_role(self.superuser['username'], self.superuser['password'], 'SUPERUSER')
         if self.admin:
-            self.query('CREATE ROLE "{0}" WITH LOGIN CREATEDB CREATEROLE PASSWORD %s'.format(
-                self.admin['username']), self.admin['password'])
+            self.create_or_update_role(self.admin['username'], self.admin['password'], 'CREATEDB CREATEROLE')
 
     def xlog_position(self):
         return self.query("""SELECT pg_xlog_location_diff(CASE WHEN pg_is_in_recovery()
@@ -684,10 +712,9 @@ recovery_target_timeline = 'latest'
         # tries twice, then returns failure (as 1)
         # uses "stream" as the xlog-method to avoid sync issues
         master_connection = leader.conn_url
-        bbfailures = 0
         maxfailures = 2
         ret = 1
-        while bbfailures < maxfailures:
+        for bbfailures in range(0, maxfailures):
             try:
                 ret = subprocess.call(['pg_basebackup', '--pgdata=' + self.data_dir,
                                        '--xlog-method=stream', "--dbname=" + master_connection], env=env)
@@ -697,9 +724,8 @@ recovery_target_timeline = 'latest'
             except Exception as e:
                 logger.error('Error when fetching backup with pg_basebackup: {0}'.format(e))
 
-            bbfailures += 1
-            if bbfailures < maxfailures:
+            if bbfailures < maxfailures - 1:
                 logger.error('Trying again in 5 seconds')
-            time.sleep(5)
+                time.sleep(5)
 
         return ret

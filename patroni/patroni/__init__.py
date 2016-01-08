@@ -18,12 +18,16 @@ class Patroni:
 
     def __init__(self, config):
         self.nap_time = config['loop_wait']
+        self.tags = config.get('tags', dict())
         self.postgresql = Postgresql(config['postgresql'])
         self.dcs = self.get_dcs(self.postgresql.name, config)
-        host, port = config['restapi']['listen'].split(':')
         self.api = RestApiServer(self, config['restapi'])
         self.ha = Ha(self)
         self.next_run = time.time()
+
+    @property
+    def nofailover(self):
+        return self.tags.get('nofailover', False)
 
     @staticmethod
     def get_dcs(name, config):
@@ -31,7 +35,7 @@ class Patroni:
             return Etcd(name, config['etcd'])
         if 'zookeeper' in config:
             return ZooKeeper(name, config['zookeeper'])
-        raise Exception('Can not find sutable configuration of distributed configuration store')
+        raise Exception('Can not find suitable configuration of distributed configuration store')
 
     def schedule_next_run(self):
         self.next_run += self.nap_time

@@ -56,6 +56,9 @@ class MockCursor:
     def fetchone(self):
         return self.results[0]
 
+    def fetchall(self):
+        return self.results
+
     def close(self):
         pass
 
@@ -162,7 +165,7 @@ class TestPostgresql(unittest.TestCase):
         self.p = Postgresql({'name': 'test0', 'scope': 'batman', 'data_dir': 'data/test0',
                              'listen': '127.0.0.1, *:5432', 'connect_address': '127.0.0.2:5432',
                              'pg_hba': ['hostssl all all 0.0.0.0/0 md5', 'host all all 0.0.0.0/0 md5'],
-                             'superuser': {'password': ''},
+                             'superuser': {'password': 'test'},
                              'admin': {'username': 'admin', 'password': 'admin'},
                              'pg_rewind': {'username': 'admin', 'password': 'admin'},
                              'replication': {'username': 'replicator',
@@ -186,6 +189,16 @@ class TestPostgresql(unittest.TestCase):
 
     def test_data_directory_empty(self):
         self.assertTrue(self.p.data_directory_empty())
+
+    def test_get_initdb_options(self):
+        self.p.initdb_options = [{'encoding': 'UTF8'}, 'data-checksums']
+        self.assertEquals(self.p.get_initdb_options(), ['--encoding=UTF8', '--data-checksums'])
+        self.p.initdb_options = [{'pgdata': 'bar'}]
+        self.assertRaises(Exception, self.p.get_initdb_options)
+        self.p.initdb_options = [{'foo': 'bar', 1: 2}]
+        self.assertRaises(Exception, self.p.get_initdb_options)
+        self.p.initdb_options = [1]
+        self.assertRaises(Exception, self.p.get_initdb_options)
 
     def test_initialize(self):
         self.assertTrue(self.p.initialize())
@@ -267,9 +280,19 @@ class TestPostgresql(unittest.TestCase):
     def test_create_replica(self):
         self.p.delete_trigger_file = Mock(side_effect=OSError())
         with patch('subprocess.call', Mock(side_effect=[1, 0])):
-            self.assertEquals(self.p.create_replica({'host': '', 'port': '', 'user': ''}, ''), 0)
+            self.assertEquals(self.p.create_replica(self.leader, ''), 0)
         with patch('subprocess.call', Mock(side_effect=[Exception(), 0])):
-            self.assertEquals(self.p.create_replica({'host': '', 'port': '', 'user': ''}, ''), 0)
+            self.assertEquals(self.p.create_replica(self.leader, ''), 0)
+
+        self.p.config['create_replica_method'] = ['wale', 'basebackup']
+        self.p.config['wale'] = {'command': 'foo'}
+        with patch('subprocess.call', Mock(return_value=0)):
+            self.assertEquals(self.p.create_replica(self.leader, ''), 0)
+            del self.p.config['wale']
+            self.assertEquals(self.p.create_replica(self.leader, ''), 0)
+
+        with patch('subprocess.call', Mock(side_effect=Exception("foo"))):
+            self.assertEquals(self.p.create_replica(self.leader, ''), 1)
 
     def test_create_connection_users(self):
         cfg = self.p.config

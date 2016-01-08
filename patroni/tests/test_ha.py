@@ -27,7 +27,7 @@ def get_cluster_not_initialized_without_leader():
 
 def get_cluster_initialized_without_leader(leader=False, failover=None):
     m = Member(0, 'leader', 28, {'conn_url': 'postgres://replicator:rep-pass@127.0.0.1:5435/postgres',
-                                 'api_url': 'http://127.0.0.1:8008/patroni'})
+                                 'api_url': 'http://127.0.0.1:8008/patroni', 'xlog_location':4})
     l = Leader(0, 0, m) if leader else None
     o = Member(0, 'other', 28, {'conn_url': 'postgres://replicator:rep-pass@127.0.0.1:5436/postgres',
                                 'api_url': 'http://127.0.0.1:8011/patroni'})
@@ -36,6 +36,10 @@ def get_cluster_initialized_without_leader(leader=False, failover=None):
 
 def get_cluster_initialized_with_leader(failover=None):
     return get_cluster_initialized_without_leader(leader=True, failover=failover)
+
+def get_cluster_initialized_with_only_leader(failover=None):
+    l = get_cluster_initialized_without_leader(leader=True, failover=failover).leader
+    return get_cluster(True, l, [l], failover)
 
 
 class MockPostgresql(Mock):
@@ -82,6 +86,8 @@ class MockPatroni:
         self.postgresql = p
         self.dcs = d
         self.api = Mock()
+        self.tags = {}
+        self.nofailover = None
         self.api.connection_string = 'http://127.0.0.1:8008'
 
 
@@ -272,6 +278,11 @@ class TestHa(unittest.TestCase):
         f = Failover(0, MockPostgresql.name, '')
         self.ha.cluster = get_cluster_initialized_with_leader(f)
         self.assertEquals(self.ha.run_cycle(), 'manual failover: demoting myself')
+        self.ha.fetch_node_status = lambda e: (e, True, True, 0, {'nofailover': 'True'})
+        self.assertEquals(self.ha.run_cycle(), 'no action.  i am the leader with the lock')
+        # manual failover from the previous leader to us won't happen if we hold the nofailover flag
+        self.ha.cluster = get_cluster_initialized_with_leader(Failover(0, 'blabla', MockPostgresql.name))
+        self.assertEquals(self.ha.run_cycle(), 'no action.  i am the leader with the lock')
 
     @patch('requests.get', requests_get)
     def test_manual_failover_process_no_leader(self):
@@ -280,24 +291,41 @@ class TestHa(unittest.TestCase):
         self.assertEquals(self.ha.run_cycle(), 'promoted self to leader by acquiring session lock')
         self.ha.cluster = get_cluster_initialized_without_leader(failover=Failover(0, '', 'leader'))
         self.assertEquals(self.ha.run_cycle(), 'promoted self to leader by acquiring session lock')
-        self.ha.fetch_node_status = lambda e: (e, True, True, 0)  # accessible, in_recovery
+        self.ha.fetch_node_status = lambda e: (e, True, True, 0, {})  # accessible, in_recovery
         self.assertEquals(self.ha.run_cycle(), 'following a different leader because i am not the healthiest node')
         self.ha.cluster = get_cluster_initialized_without_leader(failover=Failover(0, MockPostgresql.name, ''))
         self.assertEquals(self.ha.run_cycle(), 'following a different leader because i am not the healthiest node')
-        self.ha.fetch_node_status = lambda e: (e, False, True, 0)  # accessible, in_recovery
+        self.ha.fetch_node_status = lambda e: (e, False, True, 0, {})  # inaccessible, in_recovery
         self.assertEquals(self.ha.run_cycle(), 'promoted self to leader by acquiring session lock')
+        # set failover flag to True for all members of the cluster
+        # this should elect the current member, as we are not going to call the API for it.
+        self.ha.cluster = get_cluster_initialized_without_leader(failover=Failover(0, '', 'other'))
+        self.ha.fetch_node_status = lambda e: (e, True, True, 0, {'nofailover': 'True'})  # accessible, in_recovery
+        self.assertEquals(self.ha.run_cycle(), 'promoted self to leader by acquiring session lock')
+        # same as previous, but set the current member to nofailover. In no case it should be elected as a leader
+        self.ha.patroni.nofailover = True
+        self.assertEquals(self.ha.run_cycle(), 'following a different leader because I am not allowed to promote')
+
+    def test_is_healthiest_node(self):
+        self.ha.state_handler.is_leader = false
+        self.ha.patroni.nofailover = False
+        self.ha.fetch_node_status = lambda e: (e, True, True, 0, {})
+        self.assertTrue(self.ha.is_healthiest_node())
 
     def test__is_healthiest_node(self):
         self.assertTrue(self.ha._is_healthiest_node(self.ha.old_cluster.members))
         self.p.is_leader = false
-        self.ha.fetch_node_status = lambda e: (e, True, True, 0)  # accessible, in_recovery
+        self.ha.fetch_node_status = lambda e: (e, True, True, 0, {})  # accessible, in_recovery
         self.assertTrue(self.ha._is_healthiest_node(self.ha.old_cluster.members))
-        self.ha.fetch_node_status = lambda e: (e, True, False, 0)  # accessible, not in_recovery
+        self.ha.fetch_node_status = lambda e: (e, True, False, 0, {})  # accessible, not in_recovery
         self.assertFalse(self.ha._is_healthiest_node(self.ha.old_cluster.members))
-        self.ha.fetch_node_status = lambda e: (e, True, True, 1)  # accessible, in_recovery, xlog location ahead
+        self.ha.fetch_node_status = lambda e: (e, True, True, 1, {})  # accessible, in_recovery, xlog location ahead
         self.assertFalse(self.ha._is_healthiest_node(self.ha.old_cluster.members))
         self.p.check_replication_lag = false
         self.assertFalse(self.ha._is_healthiest_node(self.ha.old_cluster.members))
+        self.ha.patroni.nofailover = True
+        self.assertFalse(self.ha._is_healthiest_node(self.ha.old_cluster.members))
+        self.ha.patroni.nofailover = False
 
     @patch('requests.get', requests_get)
     def test_fetch_node_status(self):

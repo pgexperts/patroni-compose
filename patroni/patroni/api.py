@@ -3,6 +3,7 @@ import fcntl
 import json
 import logging
 import psycopg2
+import socket
 import time
 
 from patroni.exceptions import PostgresConnectionException
@@ -37,16 +38,29 @@ class RestApiHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body.encode('utf-8'))
 
+    def finish(self, *args, **kwargs):
+        try:
+            if not self.wfile.closed:
+                self.wfile.flush()
+                self.wfile.close()
+        except socket.error:
+            pass
+        self.rfile.close()
+
     def check_auth_header(self):
         auth_header = self.headers.get('Authorization')
         status = self.server.check_auth_header(auth_header)
         return not status or self.send_auth_request(status)
 
-    def do_GET(self):
+    def do_OPTIONS(self):
+        self.do_GET(options=True)
+
+    def do_GET(self, options=False):
         """Default method for processing all GET requests which can not be routed to other methods"""
 
         path = '/master' if self.path == '/' else self.path
         response = self.get_postgresql_status()
+        response.update(self.get_tags())
 
         patroni = self.server.patroni
         cluster = patroni.dcs.cluster
@@ -70,12 +84,14 @@ class RestApiHandler(BaseHTTPRequestHandler):
             status_code = 503
 
         self.send_response(status_code)
-        self.send_header('Content-Type', 'application/json')
-        self.end_headers()
-        self.wfile.write(json.dumps(response).encode('utf-8'))
+        if not options:
+            self.send_header('Content-Type', 'application/json')
+            self.end_headers()
+            self.wfile.write(json.dumps(response).encode('utf-8'))
 
     def do_GET_patroni(self):
         response = self.get_postgresql_status(True)
+        response.update(self.get_tags())
 
         self.send_response(200)
         self.send_header('Content-Type', 'application/json')
@@ -146,8 +162,8 @@ class RestApiHandler(BaseHTTPRequestHandler):
             members = [m for m in cluster.members if m.name != cluster.leader.name and m.api_url]
             if not members:
                 return b'failover is not possible: cluster does not have members except leader'
-        for member, reachable, in_recovery, xlog_location in self.server.patroni.ha.fetch_nodes_statuses(members):
-            if reachable:
+        for member, reachable, in_recovery, xlog_location, tags in self.server.patroni.ha.fetch_nodes_statuses(members):
+            if reachable and not tags.get('nofailover', False):
                 return None
         return b'failover is not possible: no good candidates have been found'
 
@@ -190,6 +206,12 @@ class RestApiHandler(BaseHTTPRequestHandler):
                 self.command = mname
         return ret
 
+    def handle_one_request(self):
+        try:
+            BaseHTTPRequestHandler.handle_one_request(self)
+        except socket.error:
+            pass
+
     def query(self, sql, *params, **kwargs):
         if not kwargs.get('retry', False):
             return self.server.query(sql, *params)
@@ -220,10 +242,16 @@ class RestApiHandler(BaseHTTPRequestHandler):
             }
         except (psycopg2.Error, RetryFailedError, PostgresConnectionException):
             state = self.server.patroni.postgresql.state
-            if state in ['stopped', 'starting', 'stopping', 'restarting', 'running']:
+            if state == 'running':
                 logger.exception('get_postgresql_status')
-                state = 'unknown' if state == 'running' else state
+                state = 'unknown'
             return {'state': state}
+
+    def get_tags(self):
+        return {'tags': self.server.patroni.tags}
+
+    def log_message(self, format, *args):
+        logger.debug("API thread: " + format % args)
 
 
 class RestApiServer(ThreadingMixIn, HTTPServer, Thread):

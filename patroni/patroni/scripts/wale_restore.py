@@ -3,7 +3,7 @@
 # sample script to clone new replicas using WAL-E restore
 # falls back to pg_basebackup if WAL-E restore fails, or if
 # WAL-E backup is too far behind
-# note that pg_basebackup still expects to use restore from 
+# note that pg_basebackup still expects to use restore from
 # WAL-E for transaction logs
 
 # theoretically should work with SWIFT, but not tested on it
@@ -21,9 +21,10 @@
 # credentials per WALE Documentation.
 
 # currently also requires that you configure the restore_command to use wal_e, example:
-  #recovery_conf:
-    #restore_command: envdir /etc/wal-e.d/env wal-e wal-fetch "%f" "%p"
+#       recovery_conf:
+#               restore_command: envdir /etc/wal-e.d/env wal-e wal-fetch "%f" "%p" -p 1
 
+from collections import namedtuple
 import logging
 import os
 import psycopg2
@@ -35,44 +36,32 @@ import argparse
 if sys.hexversion >= 0x03000000:
     long = int
 
+logging.basicConfig(format='%(asctime)s %(levelname)s: %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
 class WALERestore(object):
 
-    def __init__(self, scope, role, datadir, connstring, env_dir, threshold_mb, threshold_pct, use_iam):
+    def __init__(self, scope, datadir, connstring, env_dir, threshold_mb, threshold_pct, use_iam):
         self.scope = scope
-        self.role = role
         self.master_connection = connstring
         self.data_dir = datadir
+        self.wal_e = namedtuple('wale', 'dir,threshold_mb,threshold_pct,iam_string,cmd')
         self.wal_e.dir = env_dir
         self.wal_e.threshold_mb = threshold_mb
         self.wal_e.threshold_pct = threshold_pct
-        if use_iam == 1:
-            self.wal_e.iam_string = ' --aws-instance-profile '
-        else:
-            self.wal_e.iam_string = ''
-        if not os.path.exists(self.wal_e.dir):
-            self.init_error = True
-        else:
-            self.init_error = False
-            self.wal_e.cmd = 'envdir {0} wal-e {1} '.\
-                format(self.wal_e.dir, self.wal_e.iam_string)
+        self.wal_e.iam_string = ' --aws-instance-profile ' if use_iam == 1 else ''
+        self.wal_e.cmd = 'envdir {0} wal-e {1} '.format(self.wal_e.dir, self.wal_e.iam_string)
+        self.init_error = (not os.path.exists(self.wal_e.dir))
 
     def run(self):
         """ creates a new replica using WAL-E """
-        ret = self.replica_method()
-        return ret
-
-    def replica_method(self):
-        if self.should_use_s3_to_create_replica():
-            return self.create_replica_with_s3
-        return None
+        if not self.init_error and self.should_use_s3_to_create_replica():
+            return self.create_replica_with_s3()
+        return 2
 
     def should_use_s3_to_create_replica(self):
         """ determine whether it makes sense to use S3 and not pg_basebackup """
-        if self.init_error:
-            return False
 
         threshold_megabytes = self.wal_e.threshold_mb
         threshold_backup_size_percentage = self.wal_e.threshold_pct
@@ -137,23 +126,20 @@ class WALERestore(object):
         # if the size of the accumulated WAL segments is more than a certan percentage of the backup size
         # or exceeds the pre-determined size - pg_basebackup is chosen instead.
         return (diff_in_bytes < long(threshold_megabytes) * 1048576) and\
-               (diff_in_bytes < long(backup_size) * float(threshold_backup_size_percentage) / 100)
-                    
+            (diff_in_bytes < long(backup_size) * float(threshold_backup_size_percentage) / 100)
+
     def create_replica_with_s3(self):
-        if self.init_error:
-            return 1
         # if we're set up, restore the replica using fetch latest
         try:
-            ret = subprocess.call(self.wal_e.cmd + ' backup-fetch {} LATEST'.format(self.data_dir))
+            ret = subprocess.call(self.wal_e.cmd.split() + ['backup-fetch', '{}'.format(self.data_dir), 'LATEST'])
         except Exception as e:
             logger.error('Error when fetching backup with WAL-E: {0}'.format(e))
             return 1
-             
+
         return ret
 
 
-if __name__ == '__main__':
-
+def main():
     parser = argparse.ArgumentParser(description='Script to image replicas using WAL-E')
     parser.add_argument('--scope', required=True)
     parser.add_argument('--role', required=False)
@@ -167,12 +153,15 @@ if __name__ == '__main__':
     args = parser.parse_args()
 
     # retry cloning in a loop
-    for retry in range(0,args.retries + 1):
-        restore = WALERestore(scope=args.scope,datadir=args.datadir,connstring=args.constring,
-                              env_dir=args.env_dir,threshold_mb=args.threshold_megabytes,
-                              threshold_pct=args.threshold_backup_size_percentage)
+    for retry in range(0, args.retries + 1):
+        restore = WALERestore(scope=args.scope, datadir=args.datadir, connstring=args.connstring,
+                              env_dir=args.envdir, threshold_mb=args.threshold_megabytes,
+                              threshold_pct=args.threshold_backup_size_percentage, use_iam=args.use_iam)
         ret = restore.run()
         if ret == 0:
             break
-    
+
     sys.exit(ret)
+
+if __name__ == '__main__':
+    main()
