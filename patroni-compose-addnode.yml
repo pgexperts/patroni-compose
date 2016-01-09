@@ -1,0 +1,21 @@
+# add one node for testing purposes
+
+dbnode4: 
+    image: jberkus/patroni-node
+    hostname: dbnode4
+    expose: 
+        - "5432"
+        - "8001"
+    links: 
+        - etcd:etcd
+    volumes: 
+        - ./etc/wal-e.d:/etc/wal-e.d
+        - ./patroni:/patroni
+        - ./scripts:/scripts
+    env_file:
+        - patroni-secrets.env
+    environment:
+        PGVERSION: 9.4
+        NODE: dbnode4
+        CLUSTER: testcluster
+    entrypoint: /bin/bash /scripts/entrypoint.sh

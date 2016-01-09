@@ -42,4 +42,17 @@ Note that if you add a node using the addnode compose script, you will need to s
 
     docker-compose -f patroni-compose-addnode.yml stop
     
+# Running multiple tests
+
+If you take down the docker-compose cluster after a failed test run, and bring it back up, you may find that PostgreSQL doesn't start. This is because the etcd server still has a record for the failed master, but there's no valid node in the cluster.
+
+The solution to this is to remove all the containers and start fresh:
+
+    docker-compose -f patroni-compose-etcd-23.yml rm
+    
+If you've done several addnodes, etc., you may need to look a "docker ps -a" and "rm" multiple containers by hand.
+    
+
+
+    
 
